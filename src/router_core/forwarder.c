@@ -470,6 +470,7 @@ static inline bool qdr_forward_edge_echo_CT(qdr_delivery_t *in_dlv, qdr_link_t *
     if (out_link->conn->role == QDR_ROLE_EDGE_CONNECTION && out_link->conn->edge_mesh_id[0] != '\0') {
         qd_parsed_field_t *mesh_id = qd_message_get_ingress_mesh(in_dlv->msg);
         mesh_loop = !!mesh_id && qd_iterator_equal_n(qd_parse_raw(mesh_id), (unsigned char*) out_link->conn->edge_mesh_id, QD_DISCRIMINATOR_BYTES);
+
     }
 
     //
@@ -631,7 +632,9 @@ int qdr_forward_multicast_CT(qdr_core_t      *core,
 
             // get the inter-router connection associated with path to rnode:
             int conn_bit = (rnode->next_hop) ? rnode->next_hop->conn_mask_bit : rnode->conn_mask_bit;
-            if (conn_bit >= 0 && (!link_exclusion || qd_bitmask_value(link_exclusion, conn_bit) == 0)) {
+
+            if (conn_bit >= 0 && (!link_exclusion || qd_bitmask_value(link_exclusion, conn_bit) == 0) &&
+		qd_bitmask_value(rnode->valid_origins, origin)) {
                 qd_bitmask_set_bit(conn_set, conn_bit);
             }
         }
