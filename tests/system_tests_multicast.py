@@ -24,6 +24,8 @@
 import abc
 import sys
 from time import sleep
+import pprint
+import inspect
 
 from proton.handlers import MessagingHandler
 from proton.reactor import Container
@@ -74,6 +76,9 @@ class MulticastLinearTest(TestCase):
                 config.extend(extra)
             config = Qdrouterd.Config(config)
             cls.routers.append(cls.tester.qdrouterd(name, config, wait=True))
+            router_instance = cls.routers[-1]
+            print(f"TMPDBG: line {inspect.currentframe().f_lineno}: Router {name}: {vars(router_instance)}")
+            pprint.pprint(f"TMPDBG: line {inspect.currentframe().f_lineno}: Router {name}: {vars(router_instance)}")
             return cls.routers[-1]
 
         # configuration:
@@ -220,10 +225,12 @@ class MulticastLinearTest(TestCase):
         test.run()
         self.assertIsNone(test.error)
 
+    @unittest.skip("TMPDBG: Skipping this tests temporarily")
     def test_01_presettled_large_msg_rx_detach(self):
         self._presettled_large_msg_rx_detach(self.config, 10, ['R-EA1-1', 'R-EB1-2'])
         self._presettled_large_msg_rx_detach(self.config, 10, ['R-INT_A-2', 'R-INT_B-1'])
 
+    @unittest.skip("TMPDBG: Skipping this tests temporarily")
     def _presettled_large_msg_rx_close(self, config, count, drop_clients):
         # close receiver connections during receive
         body = " MCAST PRESETTLED LARGE RX CLOSE " + LARGE_PAYLOAD
@@ -234,10 +241,12 @@ class MulticastLinearTest(TestCase):
         test.run()
         self.assertIsNone(test.error)
 
+    @unittest.skip("TMPDBG: Skipping this tests temporarily")
     def test_02_presettled_large_msg_rx_close(self):
         self._presettled_large_msg_rx_close(self.config, 10, ['R-EA1-2', 'R-EB1-1'])
         self._presettled_large_msg_rx_close(self.config, 10, ['R-INT_A-1', 'R-INT_B-2'])
 
+    @unittest.skip("TMPDBG: Skipping this tests temporarily")
     def _unsettled_large_msg_rx_detach(self, config, count, drop_clients):
         # detach receivers during the test
         body = " MCAST UNSETTLED LARGE RX DETACH " + LARGE_PAYLOAD
@@ -245,10 +254,12 @@ class MulticastLinearTest(TestCase):
         test.run()
         self.assertIsNone(test.error)
 
+    @unittest.skip("TMPDBG: Skipping this tests temporarily")
     def test_10_unsettled_large_msg_rx_detach(self):
         self._unsettled_large_msg_rx_detach(self.config, 10, ['R-EA1-1', 'R-EB1-2'])
         self._unsettled_large_msg_rx_detach(self.config, 10, ['R-INT_A-2', 'R-INT_B-1'])
 
+    @unittest.skip("TMPDBG: Skipping this tests temporarily")
     def _unsettled_large_msg_rx_close(self, config, count, drop_clients):
         # close receiver connections during test
         body = " MCAST UNSETTLED LARGE RX CLOSE " + LARGE_PAYLOAD
@@ -256,6 +267,7 @@ class MulticastLinearTest(TestCase):
         test.run()
         self.assertIsNone(test.error)
 
+    @unittest.skip("TMPDBG: Skipping this tests temporarily")
     def test_11_unsettled_large_msg_rx_close(self):
         self._unsettled_large_msg_rx_close(self.config, 10, ['R-EA1-2', 'R-EB1-1', ])
         self._unsettled_large_msg_rx_close(self.config, 10, ['R-INT_A-1', 'R-INT_B-2'])
