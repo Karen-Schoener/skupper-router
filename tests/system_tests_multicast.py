@@ -21,11 +21,11 @@
 # Test the multicast forwarder
 #
 
+import pprint # TODO REMOVE ME
+
 import abc
 import sys
 from time import sleep
-import pprint
-import inspect
 
 from proton.handlers import MessagingHandler
 from proton.reactor import Container
@@ -76,7 +76,6 @@ class MulticastLinearTest(TestCase):
                 config.extend(extra)
             config = Qdrouterd.Config(config)
             cls.routers.append(cls.tester.qdrouterd(name, config, wait=True))
-            router_instance = cls.routers[-1]
             return cls.routers[-1]
 
         # configuration:
@@ -86,10 +85,413 @@ class MulticastLinearTest(TestCase):
         #  |  EA1  |<==>|  INT.A  |<==>|  INT.B  |<==>|  EB1  |
         #  +-------+    +---------+    +---------+    +-------+
         #
+        # Each router has 2 multicast consumers
+        # EA1 and INT.A each have a multicast sender
+
+        cls.routers = []
+
+        interrouter_port = cls.tester.get_port()
+        cls.INTA_edge_port   = cls.tester.get_port()
+        cls.INTB_edge_port   = cls.tester.get_port()
+
+        router('INT.A', 'interior',
+               [('listener', {'role': 'inter-router',
+                              'port': interrouter_port}),
+                ('listener', {'role': 'edge', 'port': cls.INTA_edge_port})])
+        cls.INT_A = cls.routers[0]
+        cls.INT_A.listener = cls.INT_A.addresses[0]
+
+        router('INT.B', 'interior',
+               [('connector', {'name': 'connectorToA',
+                               'role': 'inter-router',
+                               'port': interrouter_port}),
+                ('listener', {'role': 'edge',
+                              'port': cls.INTB_edge_port})])
+
+        cls.INT_B = cls.routers[1]
+        cls.INT_B.listener = cls.INT_B.addresses[0]
+
+        router('EA1', 'edge',
+               [('listener', {'name': 'rc', 'role': 'route-container',
+                              'port': cls.tester.get_port()}),
+                ('connector', {'name': 'uplink', 'role': 'edge',
+                               'port': cls.INTA_edge_port})])
+        cls.EA1 = cls.routers[2]
+        cls.EA1.listener = cls.EA1.addresses[0]
+        cls.EA1.route_container = cls.EA1.addresses[1]
+
+        router('EB1', 'edge',
+               [('connector', {'name': 'uplink',
+                               'role': 'edge',
+                               'port': cls.INTB_edge_port,
+                               'maxFrameSize': 1024}),
+                ('listener', {'name': 'rc', 'role': 'route-container',
+                              'port': cls.tester.get_port()})])
+        cls.EB1 = cls.routers[3]
+        cls.EB1.listener = cls.EB1.addresses[0]
+        cls.EB1.route_container = cls.EB1.addresses[1]
+
+        cls.INT_A.wait_router_connected('INT.B')
+        cls.INT_B.wait_router_connected('INT.A')
+        cls.EA1.wait_connectors()
+        cls.EB1.wait_connectors()
+
+        # Client topology:
+        # all routes have 2 receivers
+        # Edge router EA1 and interior INT_A have a sender each
+        #
+        cls.config = [
+            # edge router EA1:
+            {'router':      cls.EA1,
+             'senders':     ['S-EA1-1'],
+             'receivers':   ['R-EA1-1', 'R-EA1-2'],
+             'subscribers': 2,
+             'remotes':     0
+             },
+            # Interior router INT_A:
+            {'router':      cls.INT_A,
+             'senders':     ['S-INT_A-1'],
+             'receivers':   ['R-INT_A-1', 'R-INT_A-2'],
+             'subscribers': 3,
+             'remotes':     1,
+             },
+            # Interior router INT_B:
+            {'router':      cls.INT_B,
+             'senders':     [],
+             'receivers':   ['R-INT_B-1', 'R-INT_B-2'],
+             'subscribers': 3,
+             'remotes':     1,
+             },
+            # edge router EB1
+            {'router':      cls.EB1,
+             'senders':     [],
+             'receivers':   ['R-EB1-1', 'R-EB1-2'],
+             'subscribers': 2,
+             'remotes':     0,
+             }
+        ]
+
+    def _get_alloc_stats(self, router, stats):
+        # return a map of the current allocator counters for each entity type
+        # name in stats
+
+        #
+        # 57: END = [{u'heldByThreads': int32(384), u'typeSize': int32(536),
+        # u'transferBatchSize': int32(64), u'globalFreeListMax': int32(0),
+        # u'batchesRebalancedToGlobal': int32(774), u'typeName':
+        # u'qd_buffer_t', u'batchesRebalancedToThreads': int32(736),
+        # u'totalFreeToHeap': int32(0), u'totalAllocFromHeap': int32(2816),
+        # u'localFreeListMax': int32(128), u'type':
+        # u'io.skupper.router.allocator', u'identity':
+        # u'allocator/qd_buffer_t', u'name': u'allocator/qd_buffer_t'}]
+
+        d = dict()
+        mgmt = router.management
+        q = mgmt.query(type=ALLOCATOR_TYPE).get_dicts()
+        for name in stats:
+            d[name] = next(a for a in q if a['typeName'] == name)
+        return d
+
+    def _check_for_leaks(self):
+        for r in self.routers:
+            stats = self._get_alloc_stats(r, ALLOC_STATS)
+            for name in ALLOC_STATS:
+                # ensure threads haven't leaked
+                max_allowed  = ((W_THREADS + 1)
+                                * stats[name]['localFreeListMax'])
+                held = stats[name]['heldByThreads']
+                if held >= (2 * max_allowed):
+                    print("OOPS!!! %s: (%s) - held=%d max=%d\n   %s\n"
+                          % (r.config.router_id,
+                             name, held, max_allowed, stats))
+                    sys.stdout.flush()
+                    self.assertFalse(held >= (2 * max_allowed))
+
+    #
+    # run all the negative tests first so that if we screw up the internal
+    # state of the brokers the positive tests will likely fail
+    #
+
+    def _presettled_large_msg_rx_detach(self, config, count, drop_clients):
+        # detach receivers during receive
+        body = " MCAST PRESETTLED LARGE RX DETACH " + LARGE_PAYLOAD
+        test = MulticastPresettledRxFail(config, count,
+                                         drop_clients,
+                                         detach=True,
+                                         body=body)
+        test.run()
+        self.assertIsNone(test.error)
+
+    @unittest.skip("Skipping this tests temporarily")
+    def test_01_presettled_large_msg_rx_detach(self):
+        self._presettled_large_msg_rx_detach(self.config, 10, ['R-EA1-1', 'R-EB1-2'])
+        self._presettled_large_msg_rx_detach(self.config, 10, ['R-INT_A-2', 'R-INT_B-1'])
+
+    @unittest.skip("Skipping this tests temporarily")
+    def _presettled_large_msg_rx_close(self, config, count, drop_clients):
+        # close receiver connections during receive
+        body = " MCAST PRESETTLED LARGE RX CLOSE " + LARGE_PAYLOAD
+        test = MulticastPresettledRxFail(config, count,
+                                         drop_clients,
+                                         detach=False,
+                                         body=body)
+        test.run()
+        self.assertIsNone(test.error)
+
+    @unittest.skip("Skipping this tests temporarily")
+    def test_02_presettled_large_msg_rx_close(self):
+        self._presettled_large_msg_rx_close(self.config, 10, ['R-EA1-2', 'R-EB1-1'])
+        self._presettled_large_msg_rx_close(self.config, 10, ['R-INT_A-1', 'R-INT_B-2'])
+
+    @unittest.skip("Skipping this tests temporarily")
+    def _unsettled_large_msg_rx_detach(self, config, count, drop_clients):
+        # detach receivers during the test
+        body = " MCAST UNSETTLED LARGE RX DETACH " + LARGE_PAYLOAD
+        test = MulticastUnsettledRxFail(self.config, count, drop_clients, detach=True, body=body)
+        test.run()
+        self.assertIsNone(test.error)
+
+    @unittest.skip("Skipping this tests temporarily")
+    def test_10_unsettled_large_msg_rx_detach(self):
+        self._unsettled_large_msg_rx_detach(self.config, 10, ['R-EA1-1', 'R-EB1-2'])
+        self._unsettled_large_msg_rx_detach(self.config, 10, ['R-INT_A-2', 'R-INT_B-1'])
+
+    @unittest.skip("Skipping this tests temporarily")
+    def _unsettled_large_msg_rx_close(self, config, count, drop_clients):
+        # close receiver connections during test
+        body = " MCAST UNSETTLED LARGE RX CLOSE " + LARGE_PAYLOAD
+        test = MulticastUnsettledRxFail(self.config, count, drop_clients, detach=False, body=body)
+        test.run()
+        self.assertIsNone(test.error)
+
+    @unittest.skip("Skipping this tests temporarily")
+    def test_11_unsettled_large_msg_rx_close(self):
+        self._unsettled_large_msg_rx_close(self.config, 10, ['R-EA1-2', 'R-EB1-1', ])
+        self._unsettled_large_msg_rx_close(self.config, 10, ['R-INT_A-1', 'R-INT_B-2'])
+
+    #
+    # now the positive tests
+    #
+
+    def test_50_presettled(self):
+        # Simply send a bunch of pre-settled multicast messages
+        body = " MCAST PRESETTLED "
+        test = MulticastPresettled(self.config, 10, body, SendPresettled())
+        test.run()
+
+    @unittest.skip("Skipping this tests temporarily")
+    def test_51_presettled_mixed_large_msg(self):
+        # Same as above, but large message bodies (mixed sender settle mode)
+        body = " MCAST MAYBE PRESETTLED LARGE " + LARGE_PAYLOAD
+        test = MulticastPresettled(self.config, 11, body, SendMixed())
+        test.run()
+        self.assertIsNone(test.error)
+
+    @unittest.skip("Skipping this tests temporarily")
+    def test_52_presettled_large_msg(self):
+        # Same as above, (pre-settled sender settle mode)
+        body = " MCAST PRESETTLED LARGE " + LARGE_PAYLOAD
+        test = MulticastPresettled(self.config, 13, body, SendPresettled())
+        test.run()
+        self.assertIsNone(test.error)
+
+    @unittest.skip("Skipping this tests temporarily")
+    def test_60_unsettled_3ack(self):
+        # Sender sends unsettled, waits for Outcome from Receiver then settles
+        # Expect all messages to be accepted
+        body = " MCAST UNSETTLED "
+        test = MulticastUnsettled3Ack(self.config, 10, body)
+        test.run()
+        self.assertIsNone(test.error)
+        self.assertEqual(test.n_outcomes[Delivery.ACCEPTED], test.n_sent)
+
+    @unittest.skip("Skipping this tests temporarily")
+    def test_61_unsettled_3ack_large_msg(self):
+        # Same as above but with multiframe streaming
+        body = " MCAST UNSETTLED LARGE " + LARGE_PAYLOAD
+        test = MulticastUnsettled3Ack(self.config, 11, body=body)
+        test.run()
+        self.assertIsNone(test.error)
+        self.assertEqual(test.n_outcomes[Delivery.ACCEPTED], test.n_sent)
+
+    @unittest.skip("Skipping this tests temporarily")
+    def _unsettled_3ack_outcomes(self,
+                                 config,
+                                 count,
+                                 outcomes,
+                                 expected):
+        body = " MCAST UNSETTLED 3ACK OUTCOMES " + LARGE_PAYLOAD
+        test = MulticastUnsettled3Ack(self.config,
+                                      count,
+                                      body,
+                                      outcomes=outcomes)
+        test.run()
+        self.assertIsNone(test.error)
+        self.assertEqual(test.n_outcomes[expected], test.n_sent)
+
+    @unittest.skip("Skipping this tests temporarily")
+    def test_63_unsettled_3ack_outcomes(self):
+        # Verify the expected outcome is returned to the sender when the
+        # receivers return different outcome values.  If no outcome is
+        # specified for a receiver it will default to ACCEPTED
+
+        # expect REJECTED if any reject:
+        self._unsettled_3ack_outcomes(self.config, 3,
+                                      {'R-EB1-1': Delivery.REJECTED,
+                                       'R-EB1-2': Delivery.MODIFIED,
+                                       'R-INT_B-2': Delivery.RELEASED},
+                                      Delivery.REJECTED)
+        self._unsettled_3ack_outcomes(self.config, 3,
+                                      {'R-EB1-1': Delivery.REJECTED,
+                                       'R-INT_B-2': Delivery.RELEASED},
+                                      Delivery.REJECTED)
+        # expect ACCEPT if no rejects
+        self._unsettled_3ack_outcomes(self.config, 3,
+                                      {'R-EB1-2': Delivery.MODIFIED,
+                                       'R-INT_B-2': Delivery.RELEASED},
+                                      Delivery.ACCEPTED)
+        # expect MODIFIED over RELEASED
+        self._unsettled_3ack_outcomes(self.config, 3,
+                                      {'R-EA1-1': Delivery.RELEASED,
+                                       'R-EA1-2': Delivery.RELEASED,
+                                       'R-INT_A-1': Delivery.RELEASED,
+                                       'R-INT_A-2': Delivery.RELEASED,
+                                       'R-INT_B-1': Delivery.RELEASED,
+                                       'R-INT_B-2': Delivery.RELEASED,
+                                       'R-EB1-1': Delivery.RELEASED,
+                                       'R-EB1-2': Delivery.MODIFIED},
+                                      Delivery.MODIFIED)
+
+        # and released only if all released
+        self._unsettled_3ack_outcomes(self.config, 3,
+                                      {'R-EA1-1': Delivery.RELEASED,
+                                       'R-EA1-2': Delivery.RELEASED,
+                                       'R-INT_A-1': Delivery.RELEASED,
+                                       'R-INT_A-2': Delivery.RELEASED,
+                                       'R-INT_B-1': Delivery.RELEASED,
+                                       'R-INT_B-2': Delivery.RELEASED,
+                                       'R-EB1-1': Delivery.RELEASED,
+                                       'R-EB1-2': Delivery.RELEASED},
+                                      Delivery.RELEASED)
+
+    @unittest.skip("Skipping this tests temporarily")
+    def test_70_unsettled_1ack(self):
+        # Sender sends unsettled, expects both outcome and settlement from
+        # receiver before sender settles locally
+        body = " MCAST UNSETTLED 1ACK "
+        test = MulticastUnsettled1Ack(self.config, 10, body)
+        test.run()
+        self.assertIsNone(test.error)
+
+    @unittest.skip("Skipping this tests temporarily")
+    def test_71_unsettled_1ack_large_msg(self):
+        # Same as above but with multiframe streaming
+        body = " MCAST UNSETTLED 1ACK LARGE " + LARGE_PAYLOAD
+        test = MulticastUnsettled1Ack(self.config, 10, body)
+        test.run()
+        self.assertIsNone(test.error)
+
+    @unittest.skip("Skipping this tests temporarily")
+    def test_80_unsettled_3ack_message_annotations(self):
+        body = " MCAST UNSETTLED 3ACK LARGE MESSAGE ANNOTATIONS " + LARGE_PAYLOAD
+        test = MulticastUnsettled3AckMA(self.config, 10, body)
+        test.run()
+        self.assertIsNone(test.error)
+
+    @unittest.skip("Skipping this tests temporarily")
+    def test_90_credit_no_subscribers(self):
+        """
+        Verify that multicast senders are blocked until a consumer is present.
+        """
+        test = MulticastCreditBlocked(address=self.EA1.listener,
+                                      target='multicast/no/subscriber1')
+
+        test.run()
+        self.assertIsNone(test.error)
+
+        test = MulticastCreditBlocked(address=self.INT_A.listener,
+                                      target='multicast/no/subscriber2')
+        test.run()
+        self.assertIsNone(test.error)
+
+    @unittest.skip("Skipping this tests temporarily")
+    def test_91_anonymous_sender(self):
+        """
+        Verify that senders over anonymous links do not block waiting for
+        consumers.
+        """
+
+        # no receiver - should not block, return RELEASED
+        msg = Message(body="test_100_anonymous_sender")
+        msg.address = "multicast/test_100_anonymous_sender"
+        tx = AsyncTestSender(address=self.INT_B.listener,
+                             count=5,
+                             target=None,
+                             message=msg,
+                             container_id="test_100_anonymous_sender")
+        tx.wait()
+        self.assertEqual(5, tx.released)
+
+        # now add a receiver:
+        rx = AsyncTestReceiver(address=self.INT_A.listener,
+                               source=msg.address)
+        self.INT_B.wait_address(msg.address)
+        tx = AsyncTestSender(address=self.INT_B.listener,
+                             count=5,
+                             target=None,
+                             message=msg,
+                             container_id="test_100_anonymous_sender")
+        tx.wait()
+        self.assertEqual(5, tx.accepted)
+        rx.stop()
+
+    def test_999_check_for_leaks(self):
+        self._check_for_leaks()
+
+
+
+class MulticastMeshTest(TestCase):
+    """
+    Verify the multicast forwarding logic across a multihop mesh router
+    configuration
+    """
+    @classmethod
+    def setUpClass(cls):
+        """Start a router"""
+        super(MulticastMeshTest, cls).setUpClass()
+
+        def router(name, mode, extra):
+            config = [
+                ('router', {'mode': mode,
+                            'id': name,
+                            'workerThreads': W_THREADS}),
+                ('listener', {'role': 'normal',
+                              'port': cls.tester.get_port(),
+                              'maxFrameSize': MAX_FRAME,
+                              'linkCapacity': LINK_CAPACITY}),
+                ('address', {'prefix': 'multicast', 'distribution': 'multicast'}),
+            ]
+
+            if extra:
+                config.extend(extra)
+            config = Qdrouterd.Config(config)
+            cls.routers.append(cls.tester.qdrouterd(name, config, wait=True))
+            router_instance = cls.routers[-1]
+            return cls.routers[-1]
+
+        # configuration:
+        # 3 edge routers connected via 3 interior routers.
+        #
+        #  +-------+    +---------+    +---------+    +-------+
+        #  |  EA1  |----|  INT.A  |----|  INT.B  |----|  EB1  |
+        #  +-------+    +---------+    +---------+    +-------+
+        #                       \        /
+        #                        \      /
         #                      +---------+
         #                      |  INT.C  |
         #                      +---------+
-        #
+        #                           |
+        #                           |
         #                       +-------+
         #                       |  EC1  |
         #                       +-------+
@@ -268,244 +670,21 @@ class MulticastLinearTest(TestCase):
                     self.assertFalse(held >= (2 * max_allowed))
 
     #
-    # run all the negative tests first so that if we screw up the internal
+    # run any negative tests first so that if we screw up the internal
     # state of the brokers the positive tests will likely fail
     #
-
-    def _presettled_large_msg_rx_detach(self, config, count, drop_clients):
-        # detach receivers during receive
-        body = " MCAST PRESETTLED LARGE RX DETACH " + LARGE_PAYLOAD
-        test = MulticastPresettledRxFail(config, count,
-                                         drop_clients,
-                                         detach=True,
-                                         body=body)
-        test.run()
-        self.assertIsNone(test.error)
-
-    @unittest.skip("Skipping this tests temporarily")
-    def test_01_presettled_large_msg_rx_detach(self):
-        self._presettled_large_msg_rx_detach(self.config, 10, ['R-EA1-1', 'R-EB1-2'])
-        self._presettled_large_msg_rx_detach(self.config, 10, ['R-INT_A-2', 'R-INT_B-1'])
-
-    @unittest.skip("Skipping this tests temporarily")
-    def _presettled_large_msg_rx_close(self, config, count, drop_clients):
-        # close receiver connections during receive
-        body = " MCAST PRESETTLED LARGE RX CLOSE " + LARGE_PAYLOAD
-        test = MulticastPresettledRxFail(config, count,
-                                         drop_clients,
-                                         detach=False,
-                                         body=body)
-        test.run()
-        self.assertIsNone(test.error)
-
-    @unittest.skip("Skipping this tests temporarily")
-    def test_02_presettled_large_msg_rx_close(self):
-        self._presettled_large_msg_rx_close(self.config, 10, ['R-EA1-2', 'R-EB1-1'])
-        self._presettled_large_msg_rx_close(self.config, 10, ['R-INT_A-1', 'R-INT_B-2'])
-
-    @unittest.skip("Skipping this tests temporarily")
-    def _unsettled_large_msg_rx_detach(self, config, count, drop_clients):
-        # detach receivers during the test
-        body = " MCAST UNSETTLED LARGE RX DETACH " + LARGE_PAYLOAD
-        test = MulticastUnsettledRxFail(self.config, count, drop_clients, detach=True, body=body)
-        test.run()
-        self.assertIsNone(test.error)
-
-    @unittest.skip("Skipping this tests temporarily")
-    def test_10_unsettled_large_msg_rx_detach(self):
-        self._unsettled_large_msg_rx_detach(self.config, 10, ['R-EA1-1', 'R-EB1-2'])
-        self._unsettled_large_msg_rx_detach(self.config, 10, ['R-INT_A-2', 'R-INT_B-1'])
-
-    @unittest.skip("Skipping this tests temporarily")
-    def _unsettled_large_msg_rx_close(self, config, count, drop_clients):
-        # close receiver connections during test
-        body = " MCAST UNSETTLED LARGE RX CLOSE " + LARGE_PAYLOAD
-        test = MulticastUnsettledRxFail(self.config, count, drop_clients, detach=False, body=body)
-        test.run()
-        self.assertIsNone(test.error)
-
-    @unittest.skip("Skipping this tests temporarily")
-    def test_11_unsettled_large_msg_rx_close(self):
-        self._unsettled_large_msg_rx_close(self.config, 10, ['R-EA1-2', 'R-EB1-1', ])
-        self._unsettled_large_msg_rx_close(self.config, 10, ['R-INT_A-1', 'R-INT_B-2'])
 
     #
     # now the positive tests
     #
 
-    def test_50_presettled(self):
+    def test_150_presettled(self):
         # Simply send a bunch of pre-settled multicast messages
         body = " MCAST PRESETTLED "
         test = MulticastPresettled(self.config, 10, body, SendPresettled())
         test.run()
 
-    @unittest.skip("Skipping this tests temporarily")
-    def test_51_presettled_mixed_large_msg(self):
-        # Same as above, but large message bodies (mixed sender settle mode)
-        body = " MCAST MAYBE PRESETTLED LARGE " + LARGE_PAYLOAD
-        test = MulticastPresettled(self.config, 11, body, SendMixed())
-        test.run()
-        self.assertIsNone(test.error)
-
-    @unittest.skip("Skipping this tests temporarily")
-    def test_52_presettled_large_msg(self):
-        # Same as above, (pre-settled sender settle mode)
-        body = " MCAST PRESETTLED LARGE " + LARGE_PAYLOAD
-        test = MulticastPresettled(self.config, 13, body, SendPresettled())
-        test.run()
-        self.assertIsNone(test.error)
-
-    @unittest.skip("Skipping this tests temporarily")
-    def test_60_unsettled_3ack(self):
-        # Sender sends unsettled, waits for Outcome from Receiver then settles
-        # Expect all messages to be accepted
-        body = " MCAST UNSETTLED "
-        test = MulticastUnsettled3Ack(self.config, 10, body)
-        test.run()
-        self.assertIsNone(test.error)
-        self.assertEqual(test.n_outcomes[Delivery.ACCEPTED], test.n_sent)
-
-    @unittest.skip("Skipping this tests temporarily")
-    def test_61_unsettled_3ack_large_msg(self):
-        # Same as above but with multiframe streaming
-        body = " MCAST UNSETTLED LARGE " + LARGE_PAYLOAD
-        test = MulticastUnsettled3Ack(self.config, 11, body=body)
-        test.run()
-        self.assertIsNone(test.error)
-        self.assertEqual(test.n_outcomes[Delivery.ACCEPTED], test.n_sent)
-
-    def _unsettled_3ack_outcomes(self,
-                                 config,
-                                 count,
-                                 outcomes,
-                                 expected):
-        body = " MCAST UNSETTLED 3ACK OUTCOMES " + LARGE_PAYLOAD
-        test = MulticastUnsettled3Ack(self.config,
-                                      count,
-                                      body,
-                                      outcomes=outcomes)
-        test.run()
-        self.assertIsNone(test.error)
-        self.assertEqual(test.n_outcomes[expected], test.n_sent)
-
-    @unittest.skip("Skipping this tests temporarily")
-    def test_63_unsettled_3ack_outcomes(self):
-        # Verify the expected outcome is returned to the sender when the
-        # receivers return different outcome values.  If no outcome is
-        # specified for a receiver it will default to ACCEPTED
-
-        # expect REJECTED if any reject:
-        self._unsettled_3ack_outcomes(self.config, 3,
-                                      {'R-EB1-1': Delivery.REJECTED,
-                                       'R-EB1-2': Delivery.MODIFIED,
-                                       'R-INT_B-2': Delivery.RELEASED},
-                                      Delivery.REJECTED)
-        self._unsettled_3ack_outcomes(self.config, 3,
-                                      {'R-EB1-1': Delivery.REJECTED,
-                                       'R-INT_B-2': Delivery.RELEASED},
-                                      Delivery.REJECTED)
-        # expect ACCEPT if no rejects
-        self._unsettled_3ack_outcomes(self.config, 3,
-                                      {'R-EB1-2': Delivery.MODIFIED,
-                                       'R-INT_B-2': Delivery.RELEASED},
-                                      Delivery.ACCEPTED)
-        # expect MODIFIED over RELEASED
-        self._unsettled_3ack_outcomes(self.config, 3,
-                                      {'R-EA1-1': Delivery.RELEASED,
-                                       'R-EA1-2': Delivery.RELEASED,
-                                       'R-INT_A-1': Delivery.RELEASED,
-                                       'R-INT_A-2': Delivery.RELEASED,
-                                       'R-INT_B-1': Delivery.RELEASED,
-                                       'R-INT_B-2': Delivery.RELEASED,
-                                       'R-EB1-1': Delivery.RELEASED,
-                                       'R-EB1-2': Delivery.MODIFIED},
-                                      Delivery.MODIFIED)
-
-        # and released only if all released
-        self._unsettled_3ack_outcomes(self.config, 3,
-                                      {'R-EA1-1': Delivery.RELEASED,
-                                       'R-EA1-2': Delivery.RELEASED,
-                                       'R-INT_A-1': Delivery.RELEASED,
-                                       'R-INT_A-2': Delivery.RELEASED,
-                                       'R-INT_B-1': Delivery.RELEASED,
-                                       'R-INT_B-2': Delivery.RELEASED,
-                                       'R-EB1-1': Delivery.RELEASED,
-                                       'R-EB1-2': Delivery.RELEASED},
-                                      Delivery.RELEASED)
-
-    @unittest.skip("Skipping this tests temporarily")
-    def test_70_unsettled_1ack(self):
-        # Sender sends unsettled, expects both outcome and settlement from
-        # receiver before sender settles locally
-        body = " MCAST UNSETTLED 1ACK "
-        test = MulticastUnsettled1Ack(self.config, 10, body)
-        test.run()
-        self.assertIsNone(test.error)
-
-    @unittest.skip("Skipping this tests temporarily")
-    def test_71_unsettled_1ack_large_msg(self):
-        # Same as above but with multiframe streaming
-        body = " MCAST UNSETTLED 1ACK LARGE " + LARGE_PAYLOAD
-        test = MulticastUnsettled1Ack(self.config, 10, body)
-        test.run()
-        self.assertIsNone(test.error)
-
-    @unittest.skip("Skipping this tests temporarily")
-    def test_80_unsettled_3ack_message_annotations(self):
-        body = " MCAST UNSETTLED 3ACK LARGE MESSAGE ANNOTATIONS " + LARGE_PAYLOAD
-        test = MulticastUnsettled3AckMA(self.config, 10, body)
-        test.run()
-        self.assertIsNone(test.error)
-
-    @unittest.skip("Skipping this tests temporarily")
-    def test_90_credit_no_subscribers(self):
-        """
-        Verify that multicast senders are blocked until a consumer is present.
-        """
-        test = MulticastCreditBlocked(address=self.EA1.listener,
-                                      target='multicast/no/subscriber1')
-
-        test.run()
-        self.assertIsNone(test.error)
-
-        test = MulticastCreditBlocked(address=self.INT_A.listener,
-                                      target='multicast/no/subscriber2')
-        test.run()
-        self.assertIsNone(test.error)
-
-    @unittest.skip("Skipping this tests temporarily")
-    def test_91_anonymous_sender(self):
-        """
-        Verify that senders over anonymous links do not block waiting for
-        consumers.
-        """
-
-        # no receiver - should not block, return RELEASED
-        msg = Message(body="test_100_anonymous_sender")
-        msg.address = "multicast/test_100_anonymous_sender"
-        tx = AsyncTestSender(address=self.INT_B.listener,
-                             count=5,
-                             target=None,
-                             message=msg,
-                             container_id="test_100_anonymous_sender")
-        tx.wait()
-        self.assertEqual(5, tx.released)
-
-        # now add a receiver:
-        rx = AsyncTestReceiver(address=self.INT_A.listener,
-                               source=msg.address)
-        self.INT_B.wait_address(msg.address)
-        tx = AsyncTestSender(address=self.INT_B.listener,
-                             count=5,
-                             target=None,
-                             message=msg,
-                             container_id="test_100_anonymous_sender")
-        tx.wait()
-        self.assertEqual(5, tx.accepted)
-        rx.stop()
-
-    @unittest.skip("Skipping this tests temporarily")
-    def test_999_check_for_leaks(self):
+    def test_1999_check_for_leaks(self):
         self._check_for_leaks()
 
 
@@ -753,6 +932,9 @@ class MulticastPresettled(MulticastBase):
         # sender
         to_rcv = self.n_senders * self.msg_count * self.n_receivers
         if to_rcv == self.n_received and not self.unsettled_deliveries:
+            pprint.pprint(f"TMPDBG: MulticastPresettled.check_if_done: to_rcv: {to_rcv}")
+            pprint.pprint(f"TMPDBG: MulticastPresettled.check_if_done: self.n_received: {self.n_received}")
+            pprint.pprint(f"TMPDBG: MulticastPresettled.check_if_done: self.c_received: {self.c_received}")
             self.done()
 
     def on_message(self, event):
