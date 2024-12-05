@@ -21,7 +21,7 @@
 # Test the multicast forwarder
 #
 
-import pprint # TODO REMOVE ME
+import threading
 
 import abc
 import sys
@@ -133,6 +133,12 @@ class MulticastLinearTest(TestCase):
 
         cls.INT_A.wait_router_connected('INT.B')
         cls.INT_B.wait_router_connected('INT.A')
+
+        # Check to make sure that the routers are connected to their
+        # respective edge router.
+        cls.INT_A.is_edge_routers_connected(num_edges=1)
+        cls.INT_B.is_edge_routers_connected(num_edges=1)
+
         cls.EA1.wait_connectors()
         cls.EB1.wait_connectors()
 
@@ -222,12 +228,10 @@ class MulticastLinearTest(TestCase):
         test.run()
         self.assertIsNone(test.error)
 
-    @unittest.skip("Skipping this tests temporarily")
     def test_01_presettled_large_msg_rx_detach(self):
         self._presettled_large_msg_rx_detach(self.config, 10, ['R-EA1-1', 'R-EB1-2'])
         self._presettled_large_msg_rx_detach(self.config, 10, ['R-INT_A-2', 'R-INT_B-1'])
 
-    @unittest.skip("Skipping this tests temporarily")
     def _presettled_large_msg_rx_close(self, config, count, drop_clients):
         # close receiver connections during receive
         body = " MCAST PRESETTLED LARGE RX CLOSE " + LARGE_PAYLOAD
@@ -238,12 +242,10 @@ class MulticastLinearTest(TestCase):
         test.run()
         self.assertIsNone(test.error)
 
-    @unittest.skip("Skipping this tests temporarily")
     def test_02_presettled_large_msg_rx_close(self):
         self._presettled_large_msg_rx_close(self.config, 10, ['R-EA1-2', 'R-EB1-1'])
         self._presettled_large_msg_rx_close(self.config, 10, ['R-INT_A-1', 'R-INT_B-2'])
 
-    @unittest.skip("Skipping this tests temporarily")
     def _unsettled_large_msg_rx_detach(self, config, count, drop_clients):
         # detach receivers during the test
         body = " MCAST UNSETTLED LARGE RX DETACH " + LARGE_PAYLOAD
@@ -251,12 +253,10 @@ class MulticastLinearTest(TestCase):
         test.run()
         self.assertIsNone(test.error)
 
-    @unittest.skip("Skipping this tests temporarily")
     def test_10_unsettled_large_msg_rx_detach(self):
         self._unsettled_large_msg_rx_detach(self.config, 10, ['R-EA1-1', 'R-EB1-2'])
         self._unsettled_large_msg_rx_detach(self.config, 10, ['R-INT_A-2', 'R-INT_B-1'])
 
-    @unittest.skip("Skipping this tests temporarily")
     def _unsettled_large_msg_rx_close(self, config, count, drop_clients):
         # close receiver connections during test
         body = " MCAST UNSETTLED LARGE RX CLOSE " + LARGE_PAYLOAD
@@ -264,7 +264,6 @@ class MulticastLinearTest(TestCase):
         test.run()
         self.assertIsNone(test.error)
 
-    @unittest.skip("Skipping this tests temporarily")
     def test_11_unsettled_large_msg_rx_close(self):
         self._unsettled_large_msg_rx_close(self.config, 10, ['R-EA1-2', 'R-EB1-1', ])
         self._unsettled_large_msg_rx_close(self.config, 10, ['R-INT_A-1', 'R-INT_B-2'])
@@ -278,8 +277,8 @@ class MulticastLinearTest(TestCase):
         body = " MCAST PRESETTLED "
         test = MulticastPresettled(self.config, 10, body, SendPresettled())
         test.run()
+        self.assertIsNone(test.error)
 
-    @unittest.skip("Skipping this tests temporarily")
     def test_51_presettled_mixed_large_msg(self):
         # Same as above, but large message bodies (mixed sender settle mode)
         body = " MCAST MAYBE PRESETTLED LARGE " + LARGE_PAYLOAD
@@ -287,7 +286,6 @@ class MulticastLinearTest(TestCase):
         test.run()
         self.assertIsNone(test.error)
 
-    @unittest.skip("Skipping this tests temporarily")
     def test_52_presettled_large_msg(self):
         # Same as above, (pre-settled sender settle mode)
         body = " MCAST PRESETTLED LARGE " + LARGE_PAYLOAD
@@ -295,7 +293,6 @@ class MulticastLinearTest(TestCase):
         test.run()
         self.assertIsNone(test.error)
 
-    @unittest.skip("Skipping this tests temporarily")
     def test_60_unsettled_3ack(self):
         # Sender sends unsettled, waits for Outcome from Receiver then settles
         # Expect all messages to be accepted
@@ -305,7 +302,6 @@ class MulticastLinearTest(TestCase):
         self.assertIsNone(test.error)
         self.assertEqual(test.n_outcomes[Delivery.ACCEPTED], test.n_sent)
 
-    @unittest.skip("Skipping this tests temporarily")
     def test_61_unsettled_3ack_large_msg(self):
         # Same as above but with multiframe streaming
         body = " MCAST UNSETTLED LARGE " + LARGE_PAYLOAD
@@ -314,7 +310,6 @@ class MulticastLinearTest(TestCase):
         self.assertIsNone(test.error)
         self.assertEqual(test.n_outcomes[Delivery.ACCEPTED], test.n_sent)
 
-    @unittest.skip("Skipping this tests temporarily")
     def _unsettled_3ack_outcomes(self,
                                  config,
                                  count,
@@ -329,7 +324,6 @@ class MulticastLinearTest(TestCase):
         self.assertIsNone(test.error)
         self.assertEqual(test.n_outcomes[expected], test.n_sent)
 
-    @unittest.skip("Skipping this tests temporarily")
     def test_63_unsettled_3ack_outcomes(self):
         # Verify the expected outcome is returned to the sender when the
         # receivers return different outcome values.  If no outcome is
@@ -374,7 +368,6 @@ class MulticastLinearTest(TestCase):
                                        'R-EB1-2': Delivery.RELEASED},
                                       Delivery.RELEASED)
 
-    @unittest.skip("Skipping this tests temporarily")
     def test_70_unsettled_1ack(self):
         # Sender sends unsettled, expects both outcome and settlement from
         # receiver before sender settles locally
@@ -383,7 +376,6 @@ class MulticastLinearTest(TestCase):
         test.run()
         self.assertIsNone(test.error)
 
-    @unittest.skip("Skipping this tests temporarily")
     def test_71_unsettled_1ack_large_msg(self):
         # Same as above but with multiframe streaming
         body = " MCAST UNSETTLED 1ACK LARGE " + LARGE_PAYLOAD
@@ -391,14 +383,12 @@ class MulticastLinearTest(TestCase):
         test.run()
         self.assertIsNone(test.error)
 
-    @unittest.skip("Skipping this tests temporarily")
     def test_80_unsettled_3ack_message_annotations(self):
         body = " MCAST UNSETTLED 3ACK LARGE MESSAGE ANNOTATIONS " + LARGE_PAYLOAD
         test = MulticastUnsettled3AckMA(self.config, 10, body)
         test.run()
         self.assertIsNone(test.error)
 
-    @unittest.skip("Skipping this tests temporarily")
     def test_90_credit_no_subscribers(self):
         """
         Verify that multicast senders are blocked until a consumer is present.
@@ -414,7 +404,6 @@ class MulticastLinearTest(TestCase):
         test.run()
         self.assertIsNone(test.error)
 
-    @unittest.skip("Skipping this tests temporarily")
     def test_91_anonymous_sender(self):
         """
         Verify that senders over anonymous links do not block waiting for
@@ -579,6 +568,13 @@ class MulticastMeshTest(TestCase):
         cls.INT_B.wait_router_connected('INT.C')
         cls.INT_C.wait_router_connected('INT.A')
         cls.INT_C.wait_router_connected('INT.B')
+
+        # Check to make sure that the routers are connected to their
+        # respective edge router.
+        cls.INT_A.is_edge_routers_connected(num_edges=1)
+        cls.INT_B.is_edge_routers_connected(num_edges=1)
+        cls.INT_C.is_edge_routers_connected(num_edges=1)
+
         cls.EA1.wait_connectors()
         cls.EB1.wait_connectors()
         cls.EC1.wait_connectors()
@@ -679,10 +675,14 @@ class MulticastMeshTest(TestCase):
     #
 
     def test_150_presettled(self):
-        # Simply send a bunch of pre-settled multicast messages
+        # Simply send a bunch of pre-settled multicast messages.
+        # Also, wait before stopping test in order to wait for any
+        # any duplicate messages to be received.
         body = " MCAST PRESETTLED "
-        test = MulticastPresettled(self.config, 10, body, SendPresettled())
+        test = MulticastPresettled(self.config, 10, body, SendPresettled(), 10)
         test.run()
+        self.assertIsNone(test.error)
+
 
     def test_1999_check_for_leaks(self):
         self._check_for_leaks()
@@ -765,6 +765,7 @@ class MulticastBase(MessagingHandler, metaclass=abc.ABCMeta):
 
         # per receiver
         self.c_received = {}
+        self.c_received_msgs = {}
 
         # count per outcome
         self.n_outcomes = {}
@@ -772,11 +773,14 @@ class MulticastBase(MessagingHandler, metaclass=abc.ABCMeta):
         self.error = None
         self.timers = []
         self.reactor = None
+        self.done_timer = None
 
     def done(self):
         # stop the reactor and clean up the test
         for t in self.timers:
             t.cancel()
+        if self.done_timer is not None:
+            self.done_timer.cancel()
         for c_dict in [self.r_conns, self.s_conns]:
             for conn in c_dict.values():
                 conn.close()
@@ -784,7 +788,7 @@ class MulticastBase(MessagingHandler, metaclass=abc.ABCMeta):
         self.s_conns = {}
 
     def timeout(self):
-        self.error = "Timeout Expired"
+        self.error = f"Timeout Expired: c_received={self.c_received}"
         self.done()
 
     @abc.abstractmethod
@@ -844,6 +848,23 @@ class MulticastBase(MessagingHandler, metaclass=abc.ABCMeta):
             self.n_received += 1
             name = event.link.name
             self.c_received[name] = 1 + self.c_received.get(name, 0)
+            self.check_for_duplicate_msg(event)
+
+    def check_for_duplicate_msg(self, event): 
+        name = event.link.name
+
+        if name not in self.c_received_msgs:
+           self.c_received_msgs[name] = {}
+
+        message_body = event.message.body
+
+        # Check for duplicate messages
+        if message_body in self.c_received_msgs[name]:
+            self.error = f"Duplicate message detected for receiver {name}, c_received={self.c_received}"
+            self.done()
+        else:
+            self.c_received_msgs[name][message_body] = True
+
 
     def on_accepted(self, event):
         self.n_accepted += 1
@@ -895,7 +916,7 @@ class MulticastPresettled(MulticastBase):
     Verifies that all messages are settled by the sender
     """
 
-    def __init__(self, config, count, body, settlement_mode):
+    def __init__(self, config, count, body, settlement_mode, done_wait_interval=0):
         # use a large prefetch to prevent drops
         super(MulticastPresettled, self).__init__(config,
                                                   count,
@@ -909,6 +930,7 @@ class MulticastPresettled(MulticastBase):
         self.sender_settled = 0
         self.done_count = 0
         self.unsettled_deliveries = dict()
+        self.done_wait_interval = done_wait_interval
 
     def create_receiver(self, container, conn, source, name):
         return container.create_receiver(conn, source=source, name=name,
@@ -932,9 +954,21 @@ class MulticastPresettled(MulticastBase):
         # sender
         to_rcv = self.n_senders * self.msg_count * self.n_receivers
         if to_rcv == self.n_received and not self.unsettled_deliveries:
-            pprint.pprint(f"TMPDBG: MulticastPresettled.check_if_done: to_rcv: {to_rcv}")
-            pprint.pprint(f"TMPDBG: MulticastPresettled.check_if_done: self.n_received: {self.n_received}")
-            pprint.pprint(f"TMPDBG: MulticastPresettled.check_if_done: self.c_received: {self.c_received}")
+            if self.done_wait_interval:
+                self.done_timer = threading.Timer(self.done_wait_interval, self.finish_test)
+                self.done_timer.start()
+            else:
+                self.finish_test()
+
+    def finish_test(self):
+            check_expected_count = False
+            if check_expected_count:
+                expected_count = self.n_senders * self.msg_count
+                c_received_ok = all(count == expected_count for count in self.c_received.values())
+
+                if not c_received_ok:
+                    self.error = f"Unexpected receive message counts: {self.c_received}"
+
             self.done()
 
     def on_message(self, event):
